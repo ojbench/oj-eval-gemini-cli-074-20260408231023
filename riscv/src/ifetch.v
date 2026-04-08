@@ -1,0 +1,130 @@
+`ifndef IF
+`define IF
+`include "define.v"
+module IF(
+    input wire clk,
+    input wire rst,
+    input wire rdy,
+    // with regard to jumping
+    // from ROB
+    input wire jump_wrong,
+    input wire[`ADDR] jump_pc_from_rob,
+    
+    // fetch instr from ICache
+    // give out an addr and get an instr
+    output reg icache_enable,
+    output reg [`ADDR] pc_to_fetch,
+    input wire [`INSTRLEN] instr_fetched,
+    input wire icache_success,
+
+    // send instr to decoder
+    // send out instr and wether jumping
+    // if lsb or rob is full, then fetching should be stalled
+    input wire stall_IF,
+    output reg [`INSTRLEN] instr_to_decode,
+    output reg [`ADDR] pc_to_decoder,
+    output reg if_success_to_decoder,
+    output wire if_success_to_predictor,
+
+    // from predictor
+    input predictor_enable,
+    output wire[`ADDR] instr_to_predictor,
+    output reg [`ADDR] instr_pc_to_predictor,
+    input wire is_jump_instr,
+    input wire jump_prediction,
+    input wire [`ADDR] jump_pc_from_predictor,
+    //表示的是上一个指令是否是跳转指令，以及predict是否跳转
+    output reg ifetch_jump_change_success,
+    output wire [2:0] out_last_instr_len
+);
+
+wire [31:0] decompressed_instr;
+wire is_compressed = (instr_fetched[1:0] != 2'b11);
+wire [31:0] final_instr = is_compressed ? decompressed_instr : instr_fetched;
+wire [2:0] instr_len = is_compressed ? 3'd2 : 3'd4;
+
+Decompression decomp(
+    .IF_Instr_16(instr_fetched[15:0]),
+    .IF_Dec_32(decompressed_instr)
+);
+
+reg [2:0] last_instr_len;
+assign out_last_instr_len = last_instr_len;
+
+reg [`ADDR] pc;
+wire IF_success;
+assign if_success_to_predictor = IF_success;
+assign IF_success = (icache_success==`TRUE && stall_IF==`FALSE);
+//assign instr_to_decode = instr_fetched;
+assign instr_to_predictor = final_instr;
+always @(posedge IF_success) begin
+    if(rst== `FALSE && jump_wrong == `FALSE && rdy == `TRUE)begin
+        instr_pc_to_predictor <= pc;
+        last_instr_len <= instr_len;
+    end
+end
+
+integer begin_flag;
+wire wait_flag;
+assign wait_flag = predictor_enable && wait_flag_drag_low;
+reg wait_flag_drag_low;
+integer debug_check_pc_change;
+
+always @(posedge clk) begin
+    if (rst == `TRUE) begin
+        icache_enable <= `FALSE;
+        pc <= `NULL32;
+        begin_flag <= 0;
+        wait_flag_drag_low <= `FALSE;
+    end else if(jump_wrong==`TRUE)begin
+            pc <= jump_pc_from_rob;
+            pc_to_fetch <= jump_pc_from_rob;
+            debug_check_pc_change <= 0;
+            ifetch_jump_change_success <= `TRUE;
+            icache_enable <= `TRUE;// todo stall if
+            wait_flag_drag_low <= `FALSE;
+            if_success_to_decoder <= `FALSE;
+    end else if(rdy==`TRUE && stall_IF==`FALSE && jump_wrong == `FALSE)begin
+            ifetch_jump_change_success <= `FALSE;
+            if_success_to_decoder <= IF_success;//这个信号比IF_success满了一个时钟周期，跟decoder pc赋值相同，下面保证走向decoder的所有数据都慢了一个周期
+            if(icache_enable==`FALSE)begin//如果说现在没有正在拿某一个才可以进行
+                if(predictor_enable ==`TRUE && wait_flag == `TRUE) begin
+                    if(is_jump_instr==`TRUE) begin
+                    if(jump_prediction==`TRUE)begin
+                        pc <= jump_pc_from_predictor;
+                        pc_to_fetch <= jump_pc_from_predictor;
+                        debug_check_pc_change <= 1;
+                    end else begin
+                        pc <= pc + last_instr_len;
+                        pc_to_fetch <= pc + last_instr_len;
+                        debug_check_pc_change <= 2;
+                    end
+                    end else begin
+                        pc <= pc + last_instr_len;
+                        pc_to_fetch <= pc + last_instr_len;
+                        debug_check_pc_change <= 3;
+                    end
+                    icache_enable <= `TRUE;
+                    wait_flag_drag_low <= `FALSE;//这之后就不会再计算一次了
+                end else if(begin_flag == 0) begin
+                    begin_flag <= 1;
+                    icache_enable <= `TRUE;
+                    pc_to_fetch <= pc;
+                    debug_check_pc_change <= 5;
+                    wait_flag_drag_low <= `TRUE;
+                end else begin
+                    wait_flag_drag_low <= `TRUE;
+                end
+            end else begin
+                wait_flag_drag_low <= `TRUE;
+                if(IF_success == `TRUE)begin//如果之前已经fetch成功了
+                    pc_to_decoder <= pc;
+                    instr_to_decode <= final_instr;
+                    icache_enable <= `FALSE;
+                end
+            end
+    end
+end
+
+endmodule
+`endif
